@@ -20,33 +20,72 @@ enum UserRole {
 }
 
 model User {
-  id String @id @default(cuid()) @map("_id")
-  name String?
-  email String @unique
-  image String?
+  id       String    @id @default(cuid()) @map("_id")
+  name     String?
+  email    String    @unique
+  image    String?
   accounts Account[]
-  role UserRole @default(USER)
+  role     UserRole  @default(USER)
+
+  myPlaground Playground[]
+  stars  Star[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
 
 model Account {
-  id                String  @id @default(cuid()) @map("_id") 
+  id                String  @id @default(cuid()) @map("_id")
   userId            String  @map("user_id")
   type              String
   provider          String
   providerAccountId String
-  refresh_token     String? @map("refresh_token")
-  access_token      String? @map("access_token")
-  expires_at        Int?    @map("expires_at")
-  token_type        String? @map("token_type")
+  refreshToken      String? @map("refresh_token")
+  accessToken       String? @map("access_token")
+  expiresAt         Int?    @map("expires_at")
+  tokenType         String? @map("token_type")
   scope             String?
-  id_token          String? @map("id_token")
-  session_state     String? @map("session_state")
- 
+  idToken           String? @map("id_token")
+  sessionState      String? @map("session_state")
+
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
- 
+
   @@unique([provider, providerAccountId])
   @@index([userId])
 }
+
+enum Templates {
+  REACT
+  NEXTJS
+  EXPRESS
+  VUE
+  HONO
+  ANGULAR
+}
+
+model Star {
+  id  String @id @default(cuid()) @map("_id")
+  userId  String
+  playgroundId  String
+  isMarked  Boolean @default(true)
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  playground  Playground @relation(fields: [playgroundId], references: [id], onDelete: Cascade)
+
+  @@unique([userId,playgroundId])
+}
+model Playground {
+  id          String   @id @default(cuid()) @map("_id")
+  title       String
+  description String?
+  template    Templates @default(REACT)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  stars       Star[]   // ✅ ADD THIS
+}
+
+
