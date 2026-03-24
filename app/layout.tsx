@@ -38,11 +38,11 @@ export default async function RootLayout({
         <SessionProvider session={session}>
           <ThemeProvider
             attribute="class"
-            defaultTheme="dark"
+            defaultTheme="system"   // ✅ FIX hydration issue
             enableSystem
             disableTransitionOnChange
           >
-            <TooltipProvider>
+            <TooltipProvider>   {/* ✅ FIX tooltip error */}
               <div className="flex flex-col min-h-screen">
                 <Toaster />
                 <div className="flex-1">{children}</div>
