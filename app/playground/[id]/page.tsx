@@ -47,6 +47,8 @@ import { usePlayground } from "@/modules/playground/hooks/usePlayground";
 import { TemplateFileTree } from "@/modules/playground/components/playground-explorer";
 import { useFileExplorer } from "@/modules/playground/hooks/useFileExplorer";
 import PlaygroundEditor from "@/modules/playground/components/playground-editor";
+import { useWebContainer } from "@/modules/webcontainers/hooks/useWebContainer";
+import WebContainerPreview from "@/modules/webcontainers/components/webcontainer-preview";
 
 
 
@@ -66,6 +68,15 @@ const MainPlaygroundPage = () => {
       setOpenFiles,
       closeFile
     }=useFileExplorer()
+
+    const {
+      serverUrl,
+      isLoading:containerLoading,
+      error:containerError,
+      instance,
+      writeFileSync
+                // @ts-ignore
+    }=useWebContainer({templateData})
 
     useEffect(()=>{setPlaygroundId(id)},[id,setPlaygroundId])
     
@@ -226,6 +237,25 @@ const MainPlaygroundPage = () => {
               onContentChange={()=>{}}
               />
             </ResizablePanel>
+
+            {
+              isPreviewVisible && (
+                <>
+                <ResizableHandle/>
+                <ResizablePanel defaultSize={50}>
+                  <WebContainerPreview
+                  templateData={templateData}
+                  instance={instance}
+                  writeFileSync={writeFileSync}
+                  isLoading={containerLoading}
+                  error={containerError}
+                  serverUrl={serverUrl!}
+                  forceResetup={false}
+                          />
+                </ResizablePanel>
+                </>
+              )
+            }
           </ResizablePanelGroup>
         </div>
       </div>
