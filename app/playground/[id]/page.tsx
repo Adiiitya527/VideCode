@@ -45,6 +45,7 @@ import React, {
 import { toast } from "sonner";
 import { usePlayground } from "@/modules/playground/hooks/usePlayground";
 import { TemplateFileTree } from "@/modules/playground/components/playground-explorer";
+import { useFileExplorer } from "@/modules/playground/hooks/useFileExplorer";
 
 
 
@@ -52,18 +53,38 @@ const MainPlaygroundPage = () => {
     const {id}=useParams<{id:string}>()
 
     const {playgroundData,templateData,isLoading,error,saveTemplateData}=usePlayground(id)
+    const {
+      activeFileId,
+      closeAllFiles,
+      openFile,
+      openFiles,
+      setTemplateData,
+      setActiveFileId,
+      setPlaygroundId,
+      setOpenFiles
+    }=useFileExplorer()
 
-    console.log("templateData",templateData);
-    console.log("playgroundData", playgroundData);
+    useEffect(()=>{setPlaygroundId(id)},[id,setPlaygroundId])
     
-    const activeFile="sample.txt"
+    useEffect(()=>{
+      if(templateData && !openFiles.length) {
+        setTemplateData(templateData)
+      }
+    },[templateData,setTemplateData,openFiles.length])
+    
+    const activeFile=openFiles.find((file)=>file.id==activeFileId)
+    const hasUnsavedChanges=openFiles.some((file)=>file.hasUnsavedChanges)
+    const handleFileSelect=(file:TemplateFile) {
+      openFile(file)
+    }
+
   return (
     <TooltipProvider>
         <>
         <TemplateFileTree
           data={templateData!}
-          onFileSelect={()=>{}}
-          selectedFile={()=>{}}
+          onFileSelect={handleFileSelect}
+          selectedFile={activeFile}
           title="File Explorer"
           onAddFile={()=>{}}
           onAddFolder={()=>{}}
