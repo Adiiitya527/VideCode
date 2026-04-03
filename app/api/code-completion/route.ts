@@ -1,6 +1,5 @@
 import { type NextRequest, NextResponse } from "next/server";
 
-
 interface CodeSuggestionRequest {
   fileContent: string;
   cursorLine: number;
@@ -13,7 +12,7 @@ interface CodeContext {
   language: string;
   framework: string;
   beforeContext: string;
-  currentLine: string;
+  partialLine: string;
   afterContext: string;
   cursorPosition: { line: number; column: number };
   isInFunction: boolean;
@@ -22,14 +21,16 @@ interface CodeContext {
   incompletePatterns: string[];
 }
 
+// ✅ Abort any request that takes longer than 8 seconds
+// codellama on CPU takes 2+ minutes — useless for inline suggestions
+const OLLAMA_TIMEOUT_MS = 8000;
+
 export async function POST(request: NextRequest) {
   try {
     const body: CodeSuggestionRequest = await request.json();
 
-    const { fileContent, cursorLine, cursorColumn, suggestionType, fileName } =
-      body;
+    const { fileContent, cursorLine, cursorColumn, suggestionType, fileName } = body;
 
-    // Validate input
     if (!fileContent || cursorLine < 0 || cursorColumn < 0 || !suggestionType) {
       return NextResponse.json(
         { error: "Invalid input parameters" },
@@ -37,20 +38,17 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const context = analyzeCodeContext(
-      fileContent,
-      cursorLine,
-      cursorColumn,
-      fileName
-    );
+    const context = analyzeCodeContext(fileContent, cursorLine, cursorColumn, fileName);
 
-    const prompt = buildPrompt(context, suggestionType);
+    if (!context.partialLine.trim()) {
+      return NextResponse.json({ suggestion: null });
+    }
 
-    const suggestion = await generateSuggestion(prompt);
+    const prompt = buildPrompt(context);
+    const suggestion = await generateSuggestion(prompt, context.partialLine);
 
     return NextResponse.json({
       suggestion,
-      context,
       metadata: {
         language: context.language,
         framework: context.framework,
@@ -74,31 +72,27 @@ function analyzeCodeContext(
   fileName?: string
 ): CodeContext {
   const lines = content.split("\n");
-  const currentLine = lines[line] || "";
-
-  // Get surrounding context (10 lines before and after)
-  const contextRadius = 10;
+  const contextRadius = 5;
   const startLine = Math.max(0, line - contextRadius);
   const endLine = Math.min(lines.length, line + contextRadius);
 
+  // beforeContext must NOT include the current line — prevents model echoing it
   const beforeContext = lines.slice(startLine, line).join("\n");
+  const partialLine = (lines[line] || "").substring(0, column);
   const afterContext = lines.slice(line + 1, endLine).join("\n");
 
-  // Detect language and framework
   const language = detectLanguage(content, fileName);
   const framework = detectFramework(content);
-
-  // Analyze code patterns
   const isInFunction = detectInFunction(lines, line);
   const isInClass = detectInClass(lines, line);
-  const isAfterComment = detectAfterComment(currentLine, column);
-  const incompletePatterns = detectIncompletePatterns(currentLine, column);
+  const isAfterComment = detectAfterComment(lines[line] || "", column);
+  const incompletePatterns = detectIncompletePatterns(lines[line] || "", column);
 
   return {
     language,
     framework,
     beforeContext,
-    currentLine,
+    partialLine,
     afterContext,
     cursorPosition: { line, column },
     isInFunction,
@@ -108,80 +102,104 @@ function analyzeCodeContext(
   };
 }
 
-function buildPrompt(context: CodeContext, suggestionType: string): string {
-  return `You are an expert code completion assistant. Generate a ${suggestionType} suggestion.
-
-Language: ${context.language}
-Framework: ${context.framework}
-
-Context:
+function buildPrompt(context: CodeContext): string {
+  // codellama:latest uses Llama 2 instruct format: [INST] ... [/INST]
+  // FIM tokens (<PRE>/<SUF>/<MID>) only work on codellama:code variant
+  // Keep the prompt extremely short — less tokens = faster response on CPU
+  return `[INST] Complete this ${context.language} line. Reply with ONLY the completion, nothing else:
 ${context.beforeContext}
-${context.currentLine.substring(
-  0,
-  context.cursorPosition.column
-)}|CURSOR|${context.currentLine.substring(context.cursorPosition.column)}
-${context.afterContext}
-
-Analysis:
-- In Function: ${context.isInFunction}
-- In Class: ${context.isInClass}
-- After Comment: ${context.isAfterComment}
-- Incomplete Patterns: ${context.incompletePatterns.join(", ") || "None"}
-
-Instructions:
-1. Provide only the code that should be inserted at the cursor
-2. Maintain proper indentation and style
-3. Follow ${context.language} best practices
-4. Make the suggestion contextually appropriate
-
-Generate suggestion:`;
+${context.partialLine} [/INST]`;
 }
 
-async function generateSuggestion(prompt: string): Promise<string> {
+async function generateSuggestion(
+  prompt: string,
+  partialLine: string
+): Promise<string | null> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => {
+    controller.abort(); // ✅ kill the request if it takes too long
+  }, OLLAMA_TIMEOUT_MS);
+
   try {
-    const response = await fetch("http://localhost:11434/api/generate", {
+    const response = await fetch("http://127.0.0.1:11434/api/generate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
+      signal: controller.signal, // ✅ attach abort signal
       body: JSON.stringify({
-        model: "llama3:latest",
+        model: "codellama:latest",
         prompt,
         stream: false,
-        option: {
-          temperature: 0.7,
-          max_tokens: 300,
+        options: {
+          num_predict: 30,      // ✅ very short — we only want end of current line
+          temperature: 0.1,
+          stop: ["\n", "[INST]", "[/INST]", "```", "//", "/*"],
         },
       }),
     });
 
-       if (!response.ok) {
-      throw new Error(`AI service error: ${response.statusText}`)
+    clearTimeout(timeout);
+
+    const text = await response.text();
+    console.log("RAW OLLAMA:", text);
+
+    const data = JSON.parse(text);
+
+    // Graceful Ollama-level errors (OOM, model not found, etc.)
+    if (data.error) {
+      console.error("Ollama error:", data.error);
+      return null;
     }
 
-      const data = await response.json()
-    let suggestion = data.response
-
-     // Clean up the suggestion
-    if (suggestion.includes("```")) {
-      const codeMatch = suggestion.match(/```[\w]*\n?([\s\S]*?)```/)
-      suggestion = codeMatch ? codeMatch[1].trim() : suggestion
+    if (!response.ok) {
+      throw new Error(`AI service error: ${response.statusText}`);
     }
 
-    return suggestion
-  } catch (error) {
-      console.error("AI generation error:", error)
-    return "// AI suggestion unavailable"
+    let suggestion: string = data.response;
+    if (!suggestion) return null;
+
+    // Strip markdown fences
+    suggestion = suggestion
+      .replace(/```[\s\S]*?```/g, "")
+      .replace(/^```[\w]*\n?/, "")
+      .replace(/```$/, "")
+      .trimEnd();
+
+    // Strip instruct tags if echoed back
+    suggestion = suggestion
+      .replace(/\[INST\][\s\S]*?\[\/INST\]/g, "")
+      .trim();
+
+    // Deduplicate: strip echoed partial line prefix
+    if (suggestion.trimStart().startsWith(partialLine.trimStart())) {
+      suggestion = suggestion.trimStart().slice(partialLine.trimStart().length);
+    }
+
+    // If suggestion equals the partial line, it's useless
+    if (suggestion.trim() === partialLine.trim()) return null;
+
+    // Return only the first non-empty line
+    const firstLine = suggestion.split("\n").find((l) => l.trim().length > 0);
+    return firstLine?.trimEnd() || null;
+
+  } catch (error: any) {
+    clearTimeout(timeout);
+    if (error.name === "AbortError") {
+      console.warn(`Ollama timed out after ${OLLAMA_TIMEOUT_MS}ms — skipping suggestion`);
+      return null; // ✅ silently skip, don't crash the editor
+    }
+    console.error("AI generation error:", error);
+    return null;
   }
 }
 
-// Helper functions for code analysis
+// ── Helper functions ──────────────────────────────────────────────────────────
+
 function detectLanguage(content: string, fileName?: string): string {
   if (fileName) {
     const ext = fileName.split(".").pop()?.toLowerCase();
     const extMap: Record<string, string> = {
-      ts: "TypeScript",
-      tsx: "TypeScript",
-      js: "JavaScript",
-      jsx: "JavaScript",
+      ts: "TypeScript", tsx: "TypeScript",
+      js: "JavaScript", jsx: "JavaScript",
       py: "Python",
       java: "Java",
       go: "Go",
@@ -191,33 +209,25 @@ function detectLanguage(content: string, fileName?: string): string {
     if (ext && extMap[ext]) return extMap[ext];
   }
 
-  // Content-based detection
-  if (content.includes("interface ") || content.includes(": string"))
-    return "TypeScript";
-  if (content.includes("def ") || content.includes("import ")) return "Python";
+  if (content.includes("interface ") || content.includes(": string")) return "TypeScript";
+  if (content.includes("def ") && content.includes(":")) return "Python";
   if (content.includes("func ") || content.includes("package ")) return "Go";
 
   return "JavaScript";
 }
 
 function detectFramework(content: string): string {
-  if (content.includes("import React") || content.includes("useState"))
-    return "React";
-  if (content.includes("import Vue") || content.includes("<template>"))
-    return "Vue";
-  if (content.includes("@angular/") || content.includes("@Component"))
-    return "Angular";
-  if (content.includes("next/") || content.includes("getServerSideProps"))
-    return "Next.js";
-
+  if (content.includes("import React") || content.includes("useState")) return "React";
+  if (content.includes("import Vue") || content.includes("<template>")) return "Vue";
+  if (content.includes("@angular/") || content.includes("@Component")) return "Angular";
+  if (content.includes("next/") || content.includes("getServerSideProps")) return "Next.js";
   return "None";
 }
 
 function detectInFunction(lines: string[], currentLine: number): boolean {
   for (let i = currentLine - 1; i >= 0; i--) {
     const line = lines[i];
-    if (line?.match(/^\s*(function|def|const\s+\w+\s*=|let\s+\w+\s*=)/))
-      return true;
+    if (line?.match(/^\s*(function|def|const\s+\w+\s*=|let\s+\w+\s*=)/)) return true;
     if (line?.match(/^\s*}/)) break;
   }
   return false;
@@ -240,10 +250,8 @@ function detectIncompletePatterns(line: string, column: number): string[] {
   const beforeCursor = line.substring(0, column);
   const patterns: string[] = [];
 
-  if (/^\s*(if|while|for)\s*\($/.test(beforeCursor.trim()))
-    patterns.push("conditional");
-  if (/^\s*(function|def)\s*$/.test(beforeCursor.trim()))
-    patterns.push("function");
+  if (/^\s*(if|while|for)\s*\($/.test(beforeCursor.trim())) patterns.push("conditional");
+  if (/^\s*(function|def)\s*$/.test(beforeCursor.trim())) patterns.push("function");
   if (/\{\s*$/.test(beforeCursor)) patterns.push("object");
   if (/\[\s*$/.test(beforeCursor)) patterns.push("array");
   if (/=\s*$/.test(beforeCursor)) patterns.push("assignment");
